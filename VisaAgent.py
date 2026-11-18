@@ -56,7 +56,7 @@ print(f"Initializing agent using model: {model_name}")
 
 visa_agent = Agent(
     model=model_name,
-    result_type=ConferenceVisaWhitePaper,
+    output_type=ConferenceVisaWhitePaper,
     system_prompt=(
         "You are an expert global immigration and travel compliance consultant specializing in academic and corporate conference travel. "
         "Your task is to generate a comprehensive, highly accurate White Paper for an individual attending an international conference. "
@@ -80,7 +80,7 @@ def generate_visa_white_paper(nationality: str, destination_country: str) -> Con
     
     print(f"Running Visa Agent for {nationality} national travelling to {destination_country}...\n")
     result = visa_agent.run_sync(prompt)
-    return result.data
+    return result.output
 
 if __name__ == "__main__":
     user_nationality = "Indian"
