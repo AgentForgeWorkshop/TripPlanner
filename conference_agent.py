@@ -1,6 +1,6 @@
-import os
-import json
 import hashlib
+import json
+import os
 import re
 import tempfile
 from datetime import date
@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+from langchain_tavily import TavilyExtract
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain.chat_models import init_chat_model
@@ -25,22 +26,13 @@ load_dotenv()
 
 DEBUG = True
 MAX_SOURCES_PER_CONFERENCE = 6
-DISCOVERY_CACHE_DIR = Path(tempfile.gettempdir()) / "tripplanner-discovery"
-SEARCH_RESULTS_PER_QUERY = 8
 MAX_SNIPPET_CHARS = 2500
+MAX_VERIFICATION_BYTES = 24_000
+DISCOVERY_CACHE_DIR = Path(tempfile.gettempdir()) / "tripplanner-discovery"
 
-# Low temperature reduces model variability, but does not guarantee
-# identical responses from an external model provider.
-model = init_chat_model(os.environ["MODEL"], temperature=0)
-
-
-# STAGE 1: DISCOVERY
-
-search_tool = TavilySearch(
-    max_results=SEARCH_RESULTS_PER_QUERY,
-    search_depth="advanced",
-    include_images=False
-)
+model, search_tools = search_model_and_tools(max_results=8)
+# OpenRouter performs its search on the server and supplies no local tool.
+search_tool = next(iter(search_tools), None)
 
 conference_agent = create_agent(
     model=model,
@@ -49,9 +41,8 @@ conference_agent = create_agent(
     system_prompt="""
     You are an academic conference discovery expert.
 
-    Python has already executed the discovery searches.
-    Your job is to extract legitimate academic conference
-    candidates from the supplied search results, not to search.
+    Extract legitimate academic conference candidates from the supplied
+    search evidence, including results supplied by the web search provider.
 
     Read the entire pool before selecting candidates. Identify
     distinct events across all queries, not just the first hit.
@@ -163,7 +154,7 @@ class ExtendedConferenceOutput(ConferenceSearchOutput):
 extract_tool = TavilyExtract(
     extract_depth="basic",
     include_images=False
-)
+) if search_tool is not None else None
 
 
 # STAGE 4: INDEPENDENT VERIFICATION AGENT
@@ -580,6 +571,62 @@ def collect_sources(
 
 # STAGE 7: CONFERENCE VERIFICATION
 
+def verification_excerpt(content: str, conference: Conference, byte_budget: int) -> str:
+    """Keep verbatim passages within the budget for a JSON-encoded string."""
+    def encoded_size(text):
+        return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+
+    # Even an ASCII character needs at least one byte in the serialized payload.
+    if len(content) <= byte_budget and encoded_size(content) <= byte_budget:
+        return content
+
+    terms = [
+        conference.name, conference.city, conference.start_date.isoformat(),
+        conference.start_date.strftime("%B"), str(conference.start_date.year),
+        "registration", "rescheduled",
+    ]
+    starts = {0}
+    for term in terms:
+        if term:
+            match = re.search(re.escape(term), content, re.IGNORECASE)
+            if match:
+                starts.add(max(0, match.start() - 120))
+
+    # Merge overlapping passages so the same text doesn't consume the budget twice.
+    passages = []
+    separator = "\n[…]\n"
+    share = max(0, byte_budget - encoded_size(separator) * (len(starts) - 1)) // len(starts)
+    end = 0
+    for start in sorted(starts):
+        start = max(start, end)
+        passage = content[start:start + share]
+        while passage and encoded_size(passage) > share:
+            passage = passage[:len(passage) * share // encoded_size(passage)]
+        if passage:
+            passages.append(passage)
+            end = start + len(passage)
+    return separator.join(passages)
+
+
+def verification_prompt(conference: Conference, field: str, sources: list[dict]) -> str | None:
+    # Count metadata, JSON escaping and UTF-8 bytes, including non-English pages.
+    entries = [dict(source, content="") for source in sources]
+    payload = {"research_field": field, "proposed_conference": conference.model_dump(mode="json"),
+               "sources": entries}
+    def serialize():
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    remaining = MAX_VERIFICATION_BYTES - len(serialize().encode("utf-8"))
+    if remaining < len(entries):
+        return None
+    for index, (source, entry) in enumerate(zip(sources, entries)):
+        budget = remaining // (len(entries) - index)
+        excerpt = verification_excerpt(source["content"], conference, budget)
+        entry["content"] = excerpt
+        remaining -= len(json.dumps(excerpt, ensure_ascii=False).encode("utf-8")) - 2
+    return serialize()
+
+
 def verify_conference(
     conference: Conference,
     request: ConferenceSearchInput,
@@ -600,22 +647,15 @@ def verify_conference(
             reason="No accessible supporting sources."
         )
 
-    verification_input = {
-        "research_field": request.field,
-        "proposed_conference": conference.model_dump(mode="json"),
-        "sources": sources
-    }
+    prompt = verification_prompt(conference, request.field, sources)
+    if prompt is None:
+        return ReviewedCandidate(
+            conference=conference, status="unverified",
+            reason="Source metadata exceeded the conference verification input budget.",
+        )
 
     result = verification_agent.invoke(
-        {
-            "messages": [{
-                "role": "user",
-                "content": json.dumps(
-                    verification_input,
-                    ensure_ascii=False
-                )
-            }]
-        },
+        {"messages": [{"role": "user", "content": prompt}]},
         config={"recursion_limit": 10}
     )
 
@@ -860,6 +900,26 @@ def verify_conference(
 def find_conferences(
     request: ConferenceSearchInput
 ) -> ExtendedConferenceOutput:
+
+    if search_tool is None:
+        # The hosted search provides evidence to the model but no local pages
+        # for the independent Tavily verification stage.
+        result = conference_agent.invoke(
+            {"messages": [{"role": "user", "content": request.model_dump_json()}]},
+            config={"recursion_limit": 20},
+        )
+        output = result["structured_response"]
+        candidates = [
+            ReviewedCandidate(
+                conference=event, status="provisional",
+                reason="Found by hosted web search; independent page verification is pending.",
+                supporting_urls=event.source_urls,
+            )
+            for event in output.conferences
+            if request.start_date <= event.start_date <= event.end_date <= request.end_date
+        ][:request.max_results]
+        return ExtendedConferenceOutput(conferences=[], provisional_candidates=candidates,
+                                        search_summary=output.search_summary)
 
     discovered, discovery_snippets = discover_candidates(request)
 

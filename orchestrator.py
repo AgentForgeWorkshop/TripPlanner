@@ -5,6 +5,7 @@ from langchain.agents import create_agent
 from langchain.tools import tool
 
 from conference_agent import find_conferences as search
+from travel_agent import TravelRequest, plan_travel
 from accommodation_agent import find_accommodation as search_accommodation
 from schemas import ConferenceSearchInput, AccommodationSearchInput
 
@@ -32,6 +33,10 @@ def find_conferences(
     return search(request).model_dump_json()
 
 
+@tool
+def find_itinerary(request: TravelRequest) -> str:
+    """Compare transport and lodging for one conference and return the best eligible itinerary."""
+    return plan_travel(request).model_dump_json()
 @tool(args_schema=AccommodationSearchInput)
 def find_accommodation(
     country: str,
@@ -63,7 +68,7 @@ def find_accommodation(
 
 orchestrator = create_agent(
     model=os.environ["MODEL"],
-    tools=[find_conferences, find_accommodation],
+    tools=[find_conferences, find_accommodation, find_itinerary],
     system_prompt="""
     You coordinate specialist agents to help users plan
     conference-related travel.
@@ -89,6 +94,15 @@ orchestrator = create_agent(
     - Never interpret unknown costs as zero.
     - Report missing information rather than inventing it.
 
+    For itinerary requests delegate to find_itinerary. Use a supplied event or
+    discover conferences first and pass their actual locations and dates.
+    Pass the origin, destination, event dates, currency, constraints and preferences.
+    Default to lowest cost unless the traveler prioritizes travel time.
+    The travel budget covers round-trip transport and lodging for one attendee.
+    For whole-trip budgets deduct known registration in the same currency first.
+    If registration is unknown, flag whole-trip affordability as unverified.
+    Preserve the specialist's status, estimates, limitations and source URLs.
+    Country-information research is unavailable.
     When reporting accommodation options:
     - State which conference and dates they are for.
     - Include booking or source URLs.
@@ -103,9 +117,11 @@ orchestrator = create_agent(
 
 if __name__ == "__main__":
     query = (
-        "Find an academic ecology conference in Europe between "
-        "March 1 and June 30, 2027, then find up to three places "
-        "to stay for the conference dates."
+        "Find an academic ecology conference in Europe and USA between "
+        "January 1 and June 30, 2027, then find up to three places "
+        "to stay for the conference dates and best itinerary with flight details in terms of duration and price."
+        "My total budget for the trip is 3000 USD. I prefer to travel by train if possible, but I am open to flights if they are significantly faster or cheaper."
+        "My departure city is New York, and I would like to attend the conference with the lowest registration fee."
     )
 
 
