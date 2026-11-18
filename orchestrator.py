@@ -6,6 +6,7 @@ from langchain.tools import tool
 
 from conference_agent import find_conferences as search
 from schemas import ConferenceSearchInput
+from travel_agent import TravelRequest, plan_travel
 
 load_dotenv()
 
@@ -31,9 +32,15 @@ def find_conferences(
     return search(request).model_dump_json()
 
 
+@tool
+def find_itinerary(request: TravelRequest) -> str:
+    """Compare transport and lodging for one conference and return the best eligible itinerary."""
+    return plan_travel(request).model_dump_json()
+
+
 orchestrator = create_agent(
     model=os.environ["MODEL"],
-    tools=[find_conferences],
+    tools=[find_conferences, find_itinerary],
     system_prompt="""
     You coordinate specialist agents to help users plan
     conference-related travel.
@@ -50,8 +57,15 @@ orchestrator = create_agent(
     - Never interpret unknown costs as zero.
     - Report missing information rather than inventing it.
 
-    Travel and country-information agents are not yet
-    available. Do not invent their findings.
+    For itinerary requests delegate to find_itinerary. Use a supplied event or
+    discover conferences first and pass their actual locations and dates.
+    Pass the origin, destination, event dates, currency, constraints and preferences.
+    Default to lowest cost unless the traveler prioritizes travel time.
+    The travel budget covers round-trip transport and lodging for one attendee.
+    For whole-trip budgets deduct known registration in the same currency first.
+    If registration is unknown, flag whole-trip affordability as unverified.
+    Preserve the specialist's status, estimates, limitations and source URLs.
+    Country-information research is unavailable.
     """
 )
 
