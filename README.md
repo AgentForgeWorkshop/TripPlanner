@@ -18,9 +18,17 @@ Then create a `.env` file in the repository root with your keys and model choice
 
 ```
 OPENROUTER_API_KEY=...
-TAVILY_API_KEY=...
-MODEL=...                        # an OpenRouter model id
+MODEL=...                        # an OpenRouter model id, e.g. openrouter:openai/gpt-4.1-mini
+TAVILY_API_KEY=...               # optional, see below
+SEARCH_PROVIDER=...              # optional: tavily or openrouter
 ```
+
+### Web search
+The specialist agents can search the web in two ways (configured in `search_config.py`):
+- **Tavily** — the agent calls a Tavily search tool and can run several targeted searches. Needs `TAVILY_API_KEY`.
+- **OpenRouter** — OpenRouter's built-in web search, enabled by adding `:online` to the model id. Needs only `OPENROUTER_API_KEY`; web results are billed by OpenRouter on top of model usage.
+
+If `SEARCH_PROVIDER` is not set, Tavily is used when `TAVILY_API_KEY` is present, otherwise OpenRouter.
 
 Run an agent with the virtual environment active, e.g.:
 
