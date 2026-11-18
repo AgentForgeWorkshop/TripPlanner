@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
@@ -49,4 +49,81 @@ class Conference(BaseModel):
 
 class ConferenceSearchOutput(BaseModel):
     conferences: list[Conference]
+    search_summary: str
+
+
+class AccommodationSearchInput(BaseModel):
+    country: str
+    city: str | None = None
+    conference_name: str | None = None
+    check_in: date
+    check_out: date
+    max_price_per_night: float | None = Field(default=None, ge=0)
+    currency: str | None = None
+    max_results: int = Field(default=5, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def check_stay(self):
+        if self.check_out <= self.check_in:
+            raise ValueError("Check-out must be after check-in.")
+        if self.max_price_per_night is not None and not self.currency:
+            raise ValueError("A price limit requires a currency.")
+        return self
+
+    @classmethod
+    def from_conference(
+        cls, conference: Conference, **overrides
+    ) -> "AccommodationSearchInput":
+        """Build a search request from a conference agent result."""
+        check_out = conference.end_date
+        if check_out <= conference.start_date:
+            # One-day conference: still need at least one night.
+            check_out = conference.start_date + timedelta(days=1)
+
+        values = {
+            "country": conference.country,
+            "city": conference.city,
+            "conference_name": conference.name,
+            "check_in": conference.start_date,
+            "check_out": check_out,
+        }
+        values.update(overrides)
+        return cls(**values)
+
+
+class Accommodation(BaseModel):
+    name: str
+    accommodation_type: Literal[
+        "hotel", "hostel", "apartment", "guesthouse",
+        "university_housing", "other"
+    ]
+    city: str
+    country: str
+    address: str | None = None
+    distance_to_venue: str | None = None
+
+    price_per_night: float | None = Field(default=None, ge=0)
+    currency: str | None = None
+
+    price_status: Literal[
+        "confirmed", "estimated", "unknown"
+    ]
+
+    booking_url: str
+    source_urls: list[str]
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def check_price(self):
+        if self.price_status == "unknown":
+            if self.price_per_night is not None:
+                raise ValueError("Unknown price must have no amount.")
+        else:
+            if self.price_per_night is None or not self.currency:
+                raise ValueError("Known prices require an amount and currency.")
+        return self
+
+
+class AccommodationSearchOutput(BaseModel):
+    accommodations: list[Accommodation]
     search_summary: str

@@ -1,37 +1,45 @@
 # TripPlanner
 
-The orchestrator delegates conference discovery and itinerary research to specialist agents. For a known conference, you can ask directly for round-trip transport and a place to stay. The preliminary design is in the [workflow PDF](conference_agent_workflow_corrected.pdf).
+For the preliminary design of the workflow, check the conference_agent_workflow_corrected.pdf file. 
 
-## Environment setup
+## Installation
+To test the agents, install the requirements into a fresh virtual environment:
 
-From the project directory, create and activate a virtual environment, then install the dependencies. These commands are for macOS or Linux with Python 3.13.
-
-```sh
-python3.13 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+```bash
+# from the repository root
+python3 -m venv .venv
+source .venv/bin/activate        # on Windows: .venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-If this checkout already has the populated `.venv`, only the activation command is needed in a new shell.
+Then create a `.env` file in the repository root with your keys and model choice:
 
-Create a file named `.env` in the project directory. For OpenRouter, fill in your credentials and a model ID that supports tool calling. Both specialists use Tavily for web search.
-
-```dotenv
-MODEL=openrouter:your-provider/your-model
-OPENROUTER_API_KEY=your-openrouter-key
-TAVILY_API_KEY=your-tavily-key
+```
+OPENROUTER_API_KEY=...
+MODEL=...                        # an OpenRouter model id, e.g. openrouter:openai/gpt-4.1-mini
+TAVILY_API_KEY=...               # optional, see below
+SEARCH_PROVIDER=...              # optional: tavily or openrouter
 ```
 
-## Plan a trip
+### Web search
+The specialist agents can search the web in two ways (configured in `search_config.py`):
+- **Tavily** — the agent calls a Tavily search tool and can run several targeted searches. Needs `TAVILY_API_KEY`.
+- **OpenRouter** — OpenRouter's built-in web search, enabled by adding `:online` to the model id. Needs only `OPENROUTER_API_KEY`; web results are billed by OpenRouter on top of model usage.
 
-```sh
+If `SEARCH_PROVIDER` is not set, Tavily is used when `TAVILY_API_KEY` is present, otherwise OpenRouter.
+
+Run an agent with the virtual environment active, e.g.:
+
+```bash
+python conference_agent.py
+python accommodation_agent.py
 python orchestrator.py
 ```
 
-At the prompt, try this example with your own dates and destination.
+Run `deactivate` to leave the virtual environment.
 
-> Find a round-trip itinerary from Singapore for a conference in Bangkok on March 16–18, 2027. I can leave March 15 and must return by March 19. My transport and lodging budget is SGD 900 for one person. Prefer nonstop flights and minimize total cost.
-
-Include the origin, destination or conference search criteria, event dates, and currency. You can specify unavailable dates, maximum trip length, and lodging or transport preferences. Ask for the shortest travel time to rank by combined outbound and return duration. The default ranks by total transport and lodging cost.
-
-The specialist compares the options it finds. A recommendation includes the route, stay, sources, and any pricing assumptions. When a budget is given, a partially priced option can be returned for verification if no fully priced option qualifies. Registration and other conference expenses are separate from the travel estimate.
+## Agents
+- `conference_agent.py` — finds academic conferences matching a field, date range and region.
+- `accommodation_agent.py` — finds accommodation in the conference's country (near its city/venue) for the exact conference dates. Build its input from a conference result with `AccommodationSearchInput.from_conference(conference)`.
+- `orchestrator.py` — coordinates both specialists: conference search first, then accommodation using the conference's country and dates.
