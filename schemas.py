@@ -91,6 +91,28 @@ class AccommodationSearchInput(BaseModel):
         return cls(**values)
 
 
+DISTANCE_NOT_KNOWN = (
+    "Not known: the distance to the venue could not be verified. "
+    "Please check it yourself."
+)
+ADDRESS_NOT_KNOWN = (
+    "Not known: the address could not be verified. "
+    "Please check it yourself."
+)
+DISTRICT_NOT_KNOWN = "Not known"
+
+# Facts about an accommodation that must be backed by a source.
+# Each fact has <fact>_status, <fact>_source_url and <fact>_evidence
+# fields, plus the value fields below with their "not known" text.
+NOT_KNOWN_VALUES = {
+    "distance": {"distance_to_venue": DISTANCE_NOT_KNOWN},
+    "location": {
+        "address": ADDRESS_NOT_KNOWN,
+        "district": DISTRICT_NOT_KNOWN,
+    },
+}
+
+
 class Accommodation(BaseModel):
     name: str
     accommodation_type: Literal[
@@ -99,8 +121,59 @@ class Accommodation(BaseModel):
     ]
     city: str
     country: str
-    address: str | None = None
-    distance_to_venue: str | None = None
+
+    # Address and district. "sourced" only when a retrieved page
+    # states where this property is (with evidence); otherwise
+    # "not_known", and both are set to a standard warning.
+    location_status: Literal["sourced", "not_known"] = Field(
+        default="not_known",
+        description=(
+            "'sourced' only if a retrieved page states this property's "
+            "address or district; else 'not_known'."
+        )
+    )
+    address: str = Field(
+        default=ADDRESS_NOT_KNOWN,
+        description="Street address as stated by the source."
+    )
+    district: str = Field(
+        default=DISTRICT_NOT_KNOWN,
+        description="District or neighbourhood as stated by the source."
+    )
+    location_source_url: str | None = Field(
+        default=None,
+        description="URL of the retrieved page that states the location."
+    )
+    location_evidence: str | None = Field(
+        default=None,
+        description="Short quote or paraphrase of what the source says."
+    )
+
+    # Distance to the conference venue. "sourced" only when a retrieved
+    # page states it (with evidence); otherwise "not_known", and
+    # distance_to_venue is set to a standard warning.
+    distance_status: Literal["sourced", "not_known"] = Field(
+        default="not_known",
+        description=(
+            "'sourced' only if a retrieved page states the distance "
+            "from this property to the venue itself; else 'not_known'."
+        )
+    )
+    distance_to_venue: str = Field(
+        default=DISTANCE_NOT_KNOWN,
+        description=(
+            "Distance to the conference venue as stated by the source. "
+            "Leave unset when distance_status is 'not_known'."
+        )
+    )
+    distance_source_url: str | None = Field(
+        default=None,
+        description="URL of the retrieved page that states the distance."
+    )
+    distance_evidence: str | None = Field(
+        default=None,
+        description="Short quote or paraphrase of what the source says."
+    )
 
     price_per_night: float | None = Field(default=None, ge=0)
     currency: str | None = None
@@ -108,6 +181,20 @@ class Accommodation(BaseModel):
     price_status: Literal[
         "confirmed", "estimated", "unknown"
     ]
+
+    # Evidence for the price: which page shows it and what it says.
+    # Required for confirmed and estimated prices (see check_price).
+    price_source_url: str | None = Field(
+        default=None,
+        description="URL of the retrieved page that shows this price."
+    )
+    price_evidence: str | None = Field(
+        default=None,
+        description=(
+            "Short quote or paraphrase of what the source says: "
+            "amount, currency, and the dates/conditions it applies to."
+        )
+    )
 
     booking_url: str
     source_urls: list[str]
@@ -121,6 +208,45 @@ class Accommodation(BaseModel):
         else:
             if self.price_per_night is None or not self.currency:
                 raise ValueError("Known prices require an amount and currency.")
+            if not self.price_source_url or not self.price_evidence:
+                raise ValueError(
+                    "Confirmed and estimated prices require price_source_url "
+                    "and price_evidence. If no retrieved page shows a price, "
+                    "use price_status 'unknown'."
+                )
+        return self
+
+    def mark_not_known(self, fact: str) -> None:
+        """Replace a fact ("distance" or "location") with its warning text."""
+        setattr(self, f"{fact}_status", "not_known")
+        for field, not_known in NOT_KNOWN_VALUES[fact].items():
+            setattr(self, field, not_known)
+        setattr(self, f"{fact}_source_url", None)
+        setattr(self, f"{fact}_evidence", None)
+
+    @model_validator(mode="after")
+    def check_sourced_facts(self):
+        for fact, not_known_values in NOT_KNOWN_VALUES.items():
+            if getattr(self, f"{fact}_status") == "not_known":
+                # Overwrite any guessed value with the standard warning.
+                self.mark_not_known(fact)
+                continue
+
+            has_value = any(
+                getattr(self, field) not in (None, "", not_known)
+                for field, not_known in not_known_values.items()
+            )
+            if (
+                not has_value
+                or not getattr(self, f"{fact}_source_url")
+                or not getattr(self, f"{fact}_evidence")
+            ):
+                raise ValueError(
+                    f"A sourced {fact} requires a value, "
+                    f"{fact}_source_url and {fact}_evidence. If no "
+                    f"retrieved page states it, use {fact}_status "
+                    "'not_known'."
+                )
         return self
 
 
