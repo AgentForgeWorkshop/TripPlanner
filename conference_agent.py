@@ -27,8 +27,19 @@ conference_agent = create_agent(
     user's research field, dates, and geographic preferences.
 
     Prioritize official conference websites and scientific
-    societies. Return only relevant conferences with
-    identifiable locations and dates.
+    societies.
+
+    Return only conferences whose scientific program is
+    relevant to the requested research field.
+    Tourist activities do not establish scientific relevance.
+
+    Verify conference dates using reliable sources.
+    Never modify conference dates to fit the requested
+    search window.
+    Exclude conferences whose dates cannot be verified.
+
+    Returning zero conferences is an acceptable outcome.
+    Accuracy is more important than the number of results.
 
     For registration costs:
     - Confirmed: published fee for the requested event.
@@ -59,6 +70,14 @@ def find_conferences(
         config={"recursion_limit": 20}
     )
 
+    # DEBUG: Display the conference agent's internal messages
+    print("\n--- CONFERENCE AGENT TRACE ---\n")
+
+    for message in result["messages"]:
+        message.pretty_print()
+
+    print("\n--- END CONFERENCE AGENT TRACE ---\n")
+
     output = result["structured_response"]
 
     # Enforce the requested dates in Python
@@ -75,11 +94,11 @@ def find_conferences(
 
 if __name__ == "__main__":
     request = ConferenceSearchInput(
-        field="Ornithology and conservation biology",
-        start_date="2027-03-01",
-        end_date="2027-06-30",
-        geographic_preferences=["Europe"],
-        max_results=3
+        field="Ornithology",
+        start_date="2027-06-01",
+        end_date="2027-08-31",
+        geographic_preferences=["Latin America"],
+        max_results=5
     )
 
     results = find_conferences(request)
