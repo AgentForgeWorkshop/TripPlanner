@@ -1,22 +1,50 @@
+import os
+import json
+import hashlib
+import re
+import tempfile
+from datetime import date
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
+
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
+from langchain.chat_models import init_chat_model
+from langchain_tavily import TavilySearch, TavilyExtract
 
 from schemas import (
     Conference,
     ConferenceSearchInput,
     ConferenceSearchOutput
 )
-from search_config import search_model_and_tools
 
 load_dotenv()
 
-model, search_tools = search_model_and_tools(max_results=8)
+DEBUG = True
+MAX_SOURCES_PER_CONFERENCE = 6
+DISCOVERY_CACHE_DIR = Path(tempfile.gettempdir()) / "tripplanner-discovery"
+SEARCH_RESULTS_PER_QUERY = 8
+MAX_SNIPPET_CHARS = 2500
+
+# Low temperature reduces model variability, but does not guarantee
+# identical responses from an external model provider.
+model = init_chat_model(os.environ["MODEL"], temperature=0)
+
+
+# STAGE 1: DISCOVERY
+
+search_tool = TavilySearch(
+    max_results=SEARCH_RESULTS_PER_QUERY,
+    search_depth="advanced",
+    include_images=False
+)
 
 conference_agent = create_agent(
     model=model,
-    tools=search_tools,
+    tools=[],
     response_format=ToolStrategy(ConferenceSearchOutput),
     system_prompt="""
     You are an academic conference discovery expert.
