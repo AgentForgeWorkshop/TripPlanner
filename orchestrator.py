@@ -57,10 +57,7 @@ orchestrator = create_agent(
 
 
 if __name__ == "__main__":
-    query = (
-        "Find up to three academic ecology conferences "
-        "in Europe between March 1 and June 30, 2027."
-    )
+    query = input("What trip would you like to plan? ")
 
     result = orchestrator.invoke(
         {
