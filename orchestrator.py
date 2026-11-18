@@ -106,8 +106,18 @@ orchestrator = create_agent(
     When reporting accommodation options:
     - State which conference and dates they are for.
     - Include booking or source URLs.
-    - Distinguish confirmed, estimated, and unknown prices.
+    - Label every price as confirmed, estimated, or unknown.
+    - Never present an estimated price as confirmed or as the
+      current rate; say what it is based on.
     - Never interpret unknown prices as zero.
+    - Remind the user that prices must be checked on the
+      booking site before relying on them.
+    - Give a distance to the venue only when its
+      distance_status is "sourced". Otherwise say the
+      distance is not known and the user should check it.
+    - Give an address or district only when its
+      location_status is "sourced". Otherwise say the
+      location is not known and the user should check it.
 
     Travel and country-information agents are not yet
     available. Do not invent their findings.
