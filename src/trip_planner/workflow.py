@@ -148,10 +148,13 @@ def build_workflow(specialists: Specialists) -> CompiledStateGraph:
                 findings.append(Finding(conference=event.name, detail=conflict))
             else:
                 events.append(event)
-        if not events:
+        if not events and research.incomplete:
+            detail = "Could not substantiate a qualifying conference. See the available search sources."
+            findings.append(Finding(detail=detail))
+        elif not events:
             findings.append(Finding(detail="No qualifying conference was found for this search."))
         return {**initial, "conferences": events, "conference_sources": research.sources,
-                "discovery_findings": findings}
+                "discovery_findings": findings, "discovery_incomplete": research.incomplete}
 
     def research_candidates(
         state: State,

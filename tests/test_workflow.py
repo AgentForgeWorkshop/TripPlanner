@@ -77,24 +77,46 @@ class ConferenceWorkflowTest(TestCase):
             "Entry": (self.entry, ENTRY_URL),
         }
 
-        def fake_model(request, model):
+        def fake_model(request, model, repeat_searches, invalid_discovery_results, use_source_ids):
             payload = json.loads(request.content)
             self.assertEqual(payload["model"], model)
             names = {tool["function"]["name"] for tool in payload["tools"]}
-            self.assertIn("search_web", names)
-            schema_name, = names - {"search_web"}
             context = json.loads(next(msg["content"] for msg in payload["messages"] if msg["role"] == "user"))
+            schema_name = "Entry" if "destination" in context else "Travel" if "conference" in context else "Discovery"
             self.assertEqual("passport_country" in context["request"], schema_name == "Entry")
-            if payload["messages"][-1]["role"] == "tool":
-                name, arguments = schema_name, fixtures[schema_name][0].model_dump(mode="json")
-            else:
+            if payload["messages"][-1]["role"] == "user":
+                self.assertEqual(names, {"search_web"})
+            if "search_web" in names and (
+                payload["messages"][-1]["role"] != "tool" or (repeat_searches and schema_name == "Discovery")
+            ):
                 name, arguments = "search_web", {"query": schema_name}
+            else:
+                self.assertIn(schema_name, names)
+                name, arguments = schema_name, fixtures[schema_name][0].model_dump(mode="json")
+                if use_source_ids:
+                    search_message = next(
+                        msg for msg in reversed(payload["messages"]) if msg["role"] == "tool"
+                    )
+                    hit, = json.loads(search_message["content"])
+                    self.assertEqual(hit["url"], fixtures[schema_name][1])
+                    self.assertEqual(hit["source_id"], "S1")
+                    arguments = json.loads(
+                        json.dumps(arguments).replace(json.dumps(hit["url"]), json.dumps("S1"))
+                    )
+                if schema_name == "Discovery":
+                    attempts = sum(
+                        call["function"]["name"] == "Discovery"
+                        for message in payload["messages"]
+                        for call in message.get("tool_calls", [])
+                    )
+                    if attempts < invalid_discovery_results:
+                        arguments = {"conferences": [], "notes": "Expected an array"}
             return httpx.Response(200, request=request, json={
                 "id": "chatcmpl-fixture", "object": "chat.completion", "model": model, "created": 0,
                 "system_fingerprint": "fixture",
                 "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
                     "role": "assistant", "content": None,
-                    "tool_calls": [{"id": f"call_{name}", "type": "function", "function": {
+                    "tool_calls": [{"id": f"call_{len(payload['messages'])}_{name}", "type": "function", "function": {
                         "name": name, "arguments": json.dumps(arguments),
                     }}],
                 }}],
@@ -108,16 +130,20 @@ class ConferenceWorkflowTest(TestCase):
             }]})
 
         def run_cli(provider, model, key_name, endpoint, *, shell_tavily=False,
-                    file_tavily=True, search_provider=None):
+                    file_tavily=True, search_provider=None, repeat_searches=False,
+                    invalid_discovery_results=0, use_source_ids=False):
+            tavily_queries = []
+
             def fake_http(client, request, **kwargs):
                 if request.url.host == "api.tavily.com":
                     self.assertEqual(request.headers["Authorization"], "Bearer tavily-test-key")
+                    tavily_queries.append(json.loads(request.content)["query"])
                     return fake_search(request)
                 self.assertEqual(str(request.url), endpoint)
                 self.assertEqual(request.headers["Authorization"], "Bearer model-test-key")
                 if provider == "openrouter":
                     self.assertTrue(json.loads(request.content)["provider"]["require_parameters"])
-                return fake_model(request, model)
+                return fake_model(request, model, repeat_searches, invalid_discovery_results, use_source_ids)
 
             def fake_duckduckgo(query, *, backend, max_results):
                 self.assertEqual((backend, max_results), ("duckduckgo", 5))
@@ -155,14 +181,17 @@ class ConferenceWorkflowTest(TestCase):
                     self.assertEqual(duck_search.call_count, 3)
                 else:
                     duck_search.assert_not_called()
+                if repeat_searches:
+                    self.assertEqual(tavily_queries.count("Discovery"), 8)
             return TripPlan.model_validate_json(output.getvalue())
 
         openai = ("openai", "gpt-5-mini", "OPENAI_API_KEY", "https://api.openai.com/v1/chat/completions")
         openrouter = ("openrouter", "openai/gpt-5-mini", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions")
         for provider, settings in (
             (openai, {}),
+            (openrouter, {"repeat_searches": True, "invalid_discovery_results": 1}),
             (openrouter, {"file_tavily": False}),
-            (openrouter, {"search_provider": "duckduckgo"}),
+            (openrouter, {"search_provider": "duckduckgo", "use_source_ids": True}),
         ):
             with self.subTest(provider=provider[0], settings=settings):
                 plan = run_cli(*provider, **settings)
@@ -174,12 +203,51 @@ class ConferenceWorkflowTest(TestCase):
                 self.assertIn("Attend Materials Research Forum at Conference Hall.", option.itinerary[1].activities)
                 self.assertEqual({source.url for source in plan.sources}, {EVENT_URL, TRAVEL_URL, ENTRY_URL})
 
-        # A model-generated citation must have been seen by the specialist that cites it.
+        plan = run_cli(*openrouter, invalid_discovery_results=3)
+        self.assertEqual(plan.status, "needs_verification")
+        self.assertEqual(plan.options, [])
+        self.assertIn("returned an invalid structured result 3 times", plan.findings[0].detail)
+
+        event, = self.discovery.conferences
+        unsupported_page = f"{EVENT_URL}?edition=1980"
+        modified_event = event.model_copy(update={
+            "source_urls": [f"{EVENT_URL}/?utm_source=fixture#dates", unsupported_page],
+            "registration": cost("220.10", unsupported_page),
+        })
+        unsupported_event = event.model_copy(update={
+            "name": "Unverified Conference", "source_urls": [unsupported_page],
+        })
+        fixtures["Discovery"] = (Discovery(conferences=[modified_event, unsupported_event], notes=[]), EVENT_URL)
+        plan = run_cli(*openrouter)
+        self.assertEqual(plan.status, "needs_verification")
+        option, = plan.options
+        self.assertEqual(option.conference.name, event.name)
+        self.assertEqual(option.conference.source_urls, [EVENT_URL])
+        self.assertIsNone(option.conference.registration)
+        self.assertIsNone(option.budget.estimated_total)
+        self.assertTrue(any("Unverified Conference" in finding.detail for finding in plan.findings))
+        self.assertNotIn(unsupported_page, {source.url for source in plan.sources})
+
+        fixtures["Discovery"] = (Discovery(conferences=[unsupported_event], notes=[]), EVENT_URL)
+        plan = run_cli(*openrouter)
+        self.assertEqual(plan.status, "needs_verification")
+        self.assertEqual(plan.options, [])
+        self.assertEqual({source.url for source in plan.sources}, {EVENT_URL})
+
+        fixtures["Discovery"] = (Discovery(conferences=[], notes=[]), EVENT_URL)
+        plan = run_cli(*openrouter)
+        self.assertEqual(plan.status, "no_match")
+        self.assertEqual({source.url for source in plan.sources}, {EVENT_URL})
+
+        # A citation must come from the specialist's own evidence to support an entry decision.
+        fixtures["Discovery"] = (self.discovery, EVENT_URL)
         fixtures["Entry"] = (self.entry, TRAVEL_URL)
         plan = run_cli(*openai, shell_tavily=True)
         self.assertEqual(plan.status, "needs_verification")
-        self.assertIsNone(plan.options[0].entry)
-        self.assertIn("URL that its search did not return", plan.findings[0].detail)
+        option, = plan.options
+        self.assertEqual(option.entry.status, "unknown")
+        self.assertEqual(option.entry.requirements, [])
+        self.assertNotIn(ENTRY_URL, {source.url for source in plan.sources})
 
     def test_openrouter_reports_the_required_key(self):
         error = StringIO()
