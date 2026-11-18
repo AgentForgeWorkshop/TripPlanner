@@ -1,24 +1,20 @@
-import os
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
-from langchain_tavily import TavilySearch
 
 from schemas import (
     ConferenceSearchInput,
     ConferenceSearchOutput
 )
+from search_config import search_model_and_tools
 
 load_dotenv()
 
-search_conferences = TavilySearch(
-    max_results=8,
-    search_depth="basic"
-)
+model, search_tools = search_model_and_tools(max_results=8)
 
 conference_agent = create_agent(
-    model=os.environ["MODEL"],
-    tools=[search_conferences],
+    model=model,
+    tools=search_tools,
     response_format=ToolStrategy(ConferenceSearchOutput),
     system_prompt="""
     You are an academic conference discovery expert.
