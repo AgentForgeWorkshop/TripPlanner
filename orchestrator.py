@@ -121,6 +121,7 @@ if __name__ == "__main__":
         "January 1 and June 30, 2027, then find up to three places "
         "to stay for the conference dates and best itinerary with flight details in terms of duration and price."
         "My total budget for the trip is 3000 USD. I prefer to travel by train if possible, but I am open to flights if they are significantly faster or cheaper."
+        "My departure city is New York, and I would like to attend the conference with the lowest registration fee."
     )
 
 
