@@ -13,13 +13,14 @@ from pydantic import BaseModel, Field
 from langchain_tavily import TavilyExtract
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
+from langchain.chat_models import init_chat_model
+from langchain_tavily import TavilySearch, TavilyExtract
 
 from schemas import (
     Conference,
     ConferenceSearchInput,
     ConferenceSearchOutput
 )
-from search_config import search_model_and_tools
 
 load_dotenv()
 
