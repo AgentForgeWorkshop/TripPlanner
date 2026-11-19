@@ -72,14 +72,112 @@ visa_agent = Agent(
 # 3. Main Execution Function
 # ---------------------------------------------------------------------------
 
-def generate_visa_white_paper(nationality: str, destination_country: str) -> ConferenceVisaWhitePaper:
+# Free movement area: EU member states plus the other EEA states and Switzerland.
+_FREE_MOVEMENT = {
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+    "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+    "IS", "LI", "NO", "CH",
+}
+_COUNTRY_NAMES = {
+    "austria": "AT", "belgium": "BE", "bulgaria": "BG", "croatia": "HR", "cyprus": "CY",
+    "czechia": "CZ", "czech republic": "CZ", "czech": "CZ", "denmark": "DK", "estonia": "EE",
+    "finland": "FI", "france": "FR", "germany": "DE", "greece": "GR", "hungary": "HU",
+    "ireland": "IE", "italy": "IT", "latvia": "LV", "lithuania": "LT", "luxembourg": "LU",
+    "malta": "MT", "netherlands": "NL", "the netherlands": "NL", "poland": "PL",
+    "portugal": "PT", "romania": "RO", "slovakia": "SK", "slovenia": "SI", "spain": "ES",
+    "sweden": "SE", "iceland": "IS", "liechtenstein": "LI", "norway": "NO",
+    "switzerland": "CH", "united kingdom": "GB", "uk": "GB", "great britain": "GB",
+    "britain": "GB", "england": "GB", "scotland": "GB", "wales": "GB",
+    "northern ireland": "GB", "united states": "US", "united states of america": "US",
+    "usa": "US", "us": "US", "india": "IN", "singapore": "SG",
+}
+# Demonyms the orchestrator may pass as "nationality".
+_DEMONYMS = {"czech": "CZ", "german": "DE", "french": "FR", "british": "GB",
+             "american": "US", "indian": "IN", "singaporean": "SG", "slovak": "SK",
+             "polish": "PL", "italian": "IT", "spanish": "ES", "dutch": "NL"}
+
+
+def country_code(name: str | None) -> str | None:
+    """ISO-3166 alpha-2 code for a country name, demonym or code; None if unknown."""
+    if not name:
+        return None
+    key = " ".join(name.strip().casefold().replace(".", "").split())
+    if len(key) == 2 and key.isalpha():
+        return "GB" if key == "uk" else key.upper()
+    return _COUNTRY_NAMES.get(key) or _DEMONYMS.get(key)
+
+
+def _no_visa_needed(nationality: str, destination: str, summary: str, stay: str,
+                    documents: list[str]) -> ConferenceVisaWhitePaper:
+    return ConferenceVisaWhitePaper(
+        executive_summary=summary, applicant_nationality=nationality,
+        destination_country=destination,
+        visa_details=VisaRequirementDetails(visa_required=False, visa_type="None required",
+                                            allowed_stay_duration=stay),
+        required_documents=documents, step_by_step_procedure=[],
+        processing_time="Not applicable", recommended_timeline=[],
+        financial_budget=BudgetBreakdown(
+            visa_application_fee_usd=0, total_visa_cost_usd=0,
+            budget_notes="No visa or travel authorisation fee applies."),
+        disclaimer=("Determined from citizenship and residence rules, not a live lookup. "
+                    "Check passport/ID validity before travel."),
+    )
+
+
+def entry_rule_shortcut(nationality: str, destination: str,
+                        residence: str | None = None) -> ConferenceVisaWhitePaper | None:
+    """Cases settled by citizenship or residence alone, without asking the model.
+
+    The model otherwise applies third-country rules to EU citizens (90-day limit,
+    Schengen insurance) and visitor-visa rules to residents of the destination.
+    """
+    nat, dest, res = country_code(nationality), country_code(destination), country_code(residence)
+    if not dest:
+        return None
+    if nat == dest:
+        return _no_visa_needed(
+            nationality, destination,
+            f"{destination} is the traveler's country of citizenship; no visa or entry authorisation is needed.",
+            "Unlimited (citizen)", ["Valid passport or national identity card"])
+    if res == dest:
+        return _no_visa_needed(
+            nationality, destination,
+            f"The traveler lives in {destination}, so this is domestic travel and no visa "
+            f"or entry authorisation is needed. Keep proof of residence status (for example "
+            f"a residence permit or settled/pre-settled status) for re-entry from abroad.",
+            "Not applicable (resident)",
+            ["Valid passport or national identity card", "Proof of residence status"])
+    if nat in _FREE_MOVEMENT and dest in _FREE_MOVEMENT:
+        return _no_visa_needed(
+            nationality, destination,
+            f"As a citizen of an EU/EEA country or Switzerland, the traveler has free movement "
+            f"rights in {destination}: no visa, no travel authorisation, and the Schengen "
+            f"90/180-day short-stay rule and visa insurance requirement do not apply.",
+            "No limit for a conference visit (free movement; registration may be required after 3 months)",
+            ["Valid passport or national identity card"])
+    return None
+
+
+def generate_visa_white_paper(nationality: str, destination_country: str,
+                              residence_country: str | None = None) -> ConferenceVisaWhitePaper:
+    shortcut = entry_rule_shortcut(nationality, destination_country, residence_country)
+    if shortcut is not None:
+        print(f"Visa rule shortcut for {nationality} national (resident in "
+              f"{residence_country or 'unknown'}) travelling to {destination_country}.\n")
+        return shortcut
+
     prompt = (
         f"Generate a detailed Conference Visa White Paper for a conference attendee.\n"
         f"- Applicant Passport / Nationality: {nationality}\n"
+        f"- Country of residence: {residence_country or 'not stated'}\n"
         f"- Conference Destination Country: {destination_country}\n"
-        f"Include official visa types, document requirements, submission steps, processing times, timeline, and a visa-specific budget breakdown."
+        f"Include official visa types, document requirements, submission steps, processing times, timeline, and a visa-specific budget breakdown.\n"
+        f"Consider whether the residence permit changes the requirement. If no visa is needed "
+        f"but an electronic travel authorisation is (for example UK ETA, US ESTA, Canada eTA, "
+        f"EU ETIAS once in operation), report it as the requirement with its fee and validity. "
+        f"State that rules change and must be confirmed on the official government site."
     )
-    
+
     print(f"Running Visa Agent for {nationality} national travelling to {destination_country}...\n")
     result = call_with_quota(_run_on_shared_loop, prompt)
     return result.output
