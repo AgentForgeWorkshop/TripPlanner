@@ -121,9 +121,9 @@ def _travel_agent():
     load_dotenv()
     model, tools = search_model_and_tools(max_results=6)
     return create_agent(
-        model=os.environ["MODEL"],
+        model=model,
         middleware=[pace_model_request],
-        tools=[TavilySearch(max_results=6, search_depth="basic")],
+        tools=tools,
         response_format=ToolStrategy(TravelResearch),
         system_prompt="""Research round-trip transport and accommodation for one attendee.
         Use web search and compare distinct feasible routes or stays where available.

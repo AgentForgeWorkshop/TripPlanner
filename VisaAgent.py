@@ -1,5 +1,7 @@
+import asyncio
 import os
 import json
+import threading
 from typing import List
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -79,8 +81,20 @@ def generate_visa_white_paper(nationality: str, destination_country: str) -> Con
     )
     
     print(f"Running Visa Agent for {nationality} national travelling to {destination_country}...\n")
-    result = call_with_quota(visa_agent.run_sync, prompt)
+    result = call_with_quota(_run_on_shared_loop, prompt)
     return result.output
+
+
+# The orchestrator calls this tool from worker threads. run_sync would give each
+# call its own event loop, but pydantic-ai reuses pooled HTTP connections that
+# stay bound to the loop that opened them, so later calls fail. Run every call on
+# one long-lived loop instead.
+_loop = asyncio.new_event_loop()
+threading.Thread(target=_loop.run_forever, name="visa-agent-loop", daemon=True).start()
+
+
+def _run_on_shared_loop(prompt: str):
+    return asyncio.run_coroutine_threadsafe(visa_agent.run(prompt), _loop).result()
 
 if __name__ == "__main__":
     user_nationality = "Indian"
