@@ -1,9 +1,13 @@
 import os
 from datetime import date
 from dotenv import load_dotenv
+from model_quota import pace_model_request
 from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_tool_call
+from langchain_core.messages import ToolMessage
 from langchain.tools import tool
 
+from VisaAgent import generate_visa_white_paper
 from conference_agent import find_conferences as search
 from travel_agent import TravelRequest, plan_travel
 from accommodation_agent import find_accommodation as search_accommodation
@@ -37,6 +41,14 @@ def find_conferences(
 def find_itinerary(request: TravelRequest) -> str:
     """Compare transport and lodging for one conference and return the best eligible itinerary."""
     return plan_travel(request).model_dump_json()
+
+
+@tool
+def find_visa_requirements(nationality: str, destination_country: str) -> str:
+    """Look up conference entry requirements for a given passport nationality and destination country."""
+    return generate_visa_white_paper(nationality, destination_country).model_dump_json()
+
+
 @tool(args_schema=AccommodationSearchInput)
 def find_accommodation(
     country: str,
@@ -66,12 +78,29 @@ def find_accommodation(
     return search_accommodation(request).model_dump_json()
 
 
+@wrap_tool_call
+def report_specialist_rate_limit(request, handler):
+    try:
+        return handler(request)
+    except Exception as error:
+        if getattr(error, "status_code", None) != 429:
+            raise
+        return ToolMessage(
+            content=f"{request.tool_call['name']} unavailable: provider rate limit persisted after retries.",
+            tool_call_id=request.tool_call["id"], status="error",
+        )
+
+
 orchestrator = create_agent(
     model=os.environ["MODEL"],
-    tools=[find_conferences, find_accommodation, find_itinerary],
+    middleware=[pace_model_request, report_specialist_rate_limit],
+    tools=[find_conferences, find_accommodation, find_itinerary, find_visa_requirements],
     system_prompt="""
     You coordinate specialist agents to help users plan
     conference-related travel.
+
+    If a specialist reports a persistent rate limit, mark its findings unavailable
+    and report the available results without calling it again for that request.
 
     Delegate conference discovery to the conference expert.
 
@@ -102,7 +131,13 @@ orchestrator = create_agent(
     For whole-trip budgets deduct known registration in the same currency first.
     If registration is unknown, flag whole-trip affordability as unverified.
     Preserve the specialist's status, estimates, limitations and source URLs.
-    Country-information research is unavailable.
+    For visa questions and conference trip plans, use find_visa_requirements
+    for each distinct destination being recommended. Use the traveler's stated
+    passport nationality. If it is missing, ask for it and report any trip
+    findings already available. Never infer citizenship from the departure city.
+    Report visa or entry authorization, permitted stay, documents, application
+    steps, processing time and estimated visa fees in relevant currency. Preserve the
+    specialist's caveats and identify details that need official confirmation.
     When reporting accommodation options:
     - State which conference and dates they are for.
     - Include booking or source URLs.
@@ -119,8 +154,6 @@ orchestrator = create_agent(
       location_status is "sourced". Otherwise say the
       location is not known and the user should check it.
 
-    Travel and country-information agents are not yet
-    available. Do not invent their findings.
     """
 )
 
@@ -129,9 +162,10 @@ if __name__ == "__main__":
     query = (
         "Find an academic ecology conference in Europe and USA between "
         "January 1 and June 30, 2027, then find up to three places "
-        "to stay for the conference dates and best itinerary with flight details in terms of duration and price."
-        "My total budget for the trip is 3000 USD. I prefer to travel by train if possible, but I am open to flights if they are significantly faster or cheaper."
-        "My departure city is New York, and I would like to attend the conference with the lowest registration fee."
+        "to stay for the conference dates and best itinerary with flight details in terms of duration and price. "
+        "My total budget for the trip is 3000 USD. I prefer to travel by train if possible, but I am open to flights if they are significantly faster or cheaper. "
+        "My departure city is New York, and I would like to attend the conference with the lowest registration fee. "
+        "I currently hold an Indian passport. Include the visa requirements."
     )
 
 

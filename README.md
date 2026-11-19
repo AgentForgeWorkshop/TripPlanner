@@ -43,3 +43,12 @@ Run `deactivate` to leave the virtual environment.
 - `conference_agent.py` — finds academic conferences matching a field, date range and region.
 - `accommodation_agent.py` — finds accommodation in the conference's country (near its city/venue) for the exact conference dates. Build its input from a conference result with `AccommodationSearchInput.from_conference(conference)`.
 - `orchestrator.py` — coordinates both specialists: conference search first, then accommodation using the conference's country and dates.
+
+### Shared model rate limit
+
+The orchestrator and its specialists share a request schedule within one running
+Python process. The default is 20 model calls per minute. Set
+`TRIPPLANNER_MODEL_RPM` in `.env` to match your provider limit, or set it lower
+if other applications use the same account. HTTP 429 responses pause the shared
+schedule for the provider's `Retry-After` interval (60 seconds if absent).
+The affected call gets up to two retries.

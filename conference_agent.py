@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain_tavily import TavilyExtract
+from model_quota import pace_model_request
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 
@@ -35,6 +36,7 @@ search_tool = next(iter(search_tools), None)
 
 conference_agent = create_agent(
     model=model,
+    middleware=[pace_model_request],
     tools=[],
     response_format=ToolStrategy(ConferenceSearchOutput),
     system_prompt="""
@@ -160,6 +162,7 @@ extract_tool = TavilyExtract(
 
 verification_agent = create_agent(
     model=model,
+    middleware=[pace_model_request],
     tools=[],
     response_format=ToolStrategy(VerificationResult),
     system_prompt="""
