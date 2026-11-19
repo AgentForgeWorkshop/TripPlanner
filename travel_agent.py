@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 from model_quota import pace_model_request
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
-from langchain_tavily import TavilySearch
 from pydantic import BaseModel, Field, HttpUrl, model_validator
+
+from search_config import search_model_and_tools
 
 
 class TravelRequest(BaseModel):
@@ -118,6 +119,7 @@ def select_itinerary(request: TravelRequest, research: TravelResearch) -> Travel
 @lru_cache
 def _travel_agent():
     load_dotenv()
+    model, tools = search_model_and_tools(max_results=6)
     return create_agent(
         model=os.environ["MODEL"],
         middleware=[pace_model_request],
