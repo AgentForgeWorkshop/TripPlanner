@@ -16,6 +16,7 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain.chat_models import init_chat_model
 from langchain_tavily import TavilySearch, TavilyExtract
 
+from search_config import search_model_and_tools
 from schemas import (
     Conference,
     ConferenceSearchInput,
@@ -1483,7 +1484,7 @@ def find_conferences(
         output = result["structured_response"]
         candidates = [
             ReviewedCandidate(
-                conference=event, status="provisional",
+                conference=ReviewedConference.from_discovery(event), status="provisional",
                 reason="Found by hosted web search; independent page verification is pending.",
                 supporting_urls=event.source_urls,
             )
