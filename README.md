@@ -25,7 +25,7 @@ SEARCH_PROVIDER=...              # optional: tavily or openrouter
 ### Web search
 The specialist agents can search the web in two ways (configured in `search_config.py`):
 - **Tavily** — the agent calls a Tavily search tool and can run several targeted searches. Needs `TAVILY_API_KEY`.
-- **OpenRouter** — OpenRouter's built-in web search, enabled by adding `:online` to the model id. Needs only `OPENROUTER_API_KEY`; web results are billed by OpenRouter on top of model usage.
+- **OpenRouter** — OpenRouter's built-in web search, configured by `search_config.py`. Needs only `OPENROUTER_API_KEY`; web results are billed by OpenRouter on top of model usage.
 
 If `SEARCH_PROVIDER` is not set, Tavily is used when `TAVILY_API_KEY` is present, otherwise OpenRouter.
 
@@ -34,6 +34,7 @@ Run an agent with the virtual environment active, e.g.:
 ```bash
 python conference_agent.py
 python accommodation_agent.py
+python VisaAgent.py
 python orchestrator.py
 ```
 
@@ -42,7 +43,26 @@ Run `deactivate` to leave the virtual environment.
 ## Agents
 - `conference_agent.py` — finds academic conferences matching a field, date range and region.
 - `accommodation_agent.py` — finds accommodation in the conference's country (near its city/venue) for the exact conference dates. Build its input from a conference result with `AccommodationSearchInput.from_conference(conference)`.
-- `orchestrator.py` — coordinates both specialists: conference search first, then accommodation using the conference's country and dates.
+- `travel_agent.py` — compares transport and lodging itineraries.
+- `VisaAgent.py` — researches entry requirements, visa fees and procedures with LangChain; uses deterministic shortcuts for citizenship, domestic trips and free movement. The same `generate_visa_white_paper()` entry point is retained. Visa models now live in `schemas.py`; unknown fees are null, and sources are research leads rather than independently verified advice.
+- `orchestrator.py` — coordinates all four specialists and renders the HTML trip report.
+
+All agents use LangChain and Pydantic V2. PydanticAI is no longer required.
+When upgrading an existing environment, run `python -m pip install -r requirements.txt`
+and `python -m pip check`. Removing a dependency from requirements does not uninstall it;
+if no other project uses the old libraries in this environment, optionally run
+`python -m pip uninstall pydantic-ai pydantic-ai-slim`.
+
+### Tests (no API charges)
+
+From the repository root, with the virtual environment active:
+
+```bash
+MODEL=openrouter:example/model OPENROUTER_API_KEY=test TAVILY_API_KEY=test SEARCH_PROVIDER=tavily python -m unittest discover -s tests -v
+```
+
+`tests/test_registration.py` is a separate live integration script, not an offline unit test.
+Run it intentionally from the root with real keys: `PYTHONPATH=. python tests/test_registration.py`.
 
 ### Shared model rate limit
 

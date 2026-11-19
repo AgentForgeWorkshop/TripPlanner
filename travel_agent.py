@@ -142,6 +142,6 @@ def _travel_agent():
 def plan_travel(request: TravelRequest) -> TravelResult:
     response = _travel_agent().invoke(
         {"messages": [{"role": "user", "content": request.model_dump_json()}]},
-        config={"recursion_limit": 30},
+        config={"recursion_limit": 60},
     )
     return select_itinerary(request, response["structured_response"])
