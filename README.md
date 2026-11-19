@@ -48,6 +48,11 @@ SEARCH_PROVIDER=tavily           # optional: tavily or openrouter
 TRIPPLANNER_MODEL_RPM=20         # optional
 ```
 
+### Web search
+The specialist agents can search the web in two ways (configured in `search_config.py`):
+- **Tavily** — the agent calls a Tavily search tool and can run several targeted searches. Needs `TAVILY_API_KEY`.
+- **OpenRouter** — OpenRouter's built-in web search, configured by `search_config.py`. Needs only `OPENROUTER_API_KEY`; web results are billed by OpenRouter on top of model usage.
+=======
 | Variable | Required | Meaning |
 |---|---|---|
 | `OPENROUTER_API_KEY` | yes | Key for model calls through OpenRouter. |
@@ -56,16 +61,12 @@ TRIPPLANNER_MODEL_RPM=20         # optional
 | `SEARCH_PROVIDER` | no | `tavily` or `openrouter`. If unset, Tavily is used when `TAVILY_API_KEY` exists, otherwise OpenRouter. |
 | `TRIPPLANNER_MODEL_RPM` | no | Maximum model calls per minute, shared by all agents in one run. Default `20`. |
 
-**Web search providers** (see `search_config.py`):
-- **Tavily**: the agents call a Tavily search tool and can run several targeted searches.
-- **OpenRouter**: OpenRouter's web-search plugin adds results to each model call.
-  It needs no extra key, but OpenRouter bills search on top of model usage.
-
 **Rate limits:** if the provider returns HTTP 429, all agents pause for its
 `Retry-After` interval (60 seconds if none is given), and the call is retried up to
 twice. Lower `TRIPPLANNER_MODEL_RPM` if other applications share your account.
 
 `.env` is git-ignored. Never commit your API keys.
+
 
 ## Usage
 
@@ -74,6 +75,10 @@ Activate the virtual environment first, or prefix commands with `.venv/bin/`.
 ### Quick start
 
 ```bash
+
+python conference_agent.py
+python accommodation_agent.py
+python VisaAgent.py
 python orchestrator.py
 ```
 

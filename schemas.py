@@ -3,6 +3,55 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+class VisaSearchInput(BaseModel):
+    nationality: str = Field(min_length=1, description="Passport nationality, not the departure country.")
+    destination_country: str = Field(min_length=1)
+    residence_country: str | None = None
+    origin_country: str | None = Field(default=None, description="Country from which this trip begins.")
+
+
+class VisaRequirementDetails(BaseModel):
+    visa_required: bool | None = Field(description="True for a visa, false when exempt, null if uncertain. Electronic authorisations are described separately in visa_type.")
+    visa_type: str = Field(description="Visa or electronic entry authorisation required, or None required / Unknown.")
+    allowed_stay_duration: str
+
+
+class TimelineStep(BaseModel):
+    timeframe: str
+    action: str
+
+
+class BudgetBreakdown(BaseModel):
+    visa_application_fee_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    biometrics_or_service_fee_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    mandatory_visa_insurance_fee_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    total_visa_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    budget_notes: str = Field(description="Fee sources, conversion basis, exclusions, and uncertainty. Null means unknown; zero means explicitly not applicable or free.")
+
+    @model_validator(mode="after")
+    def calculate_total(self):
+        components = (self.visa_application_fee_usd, self.biometrics_or_service_fee_usd,
+                      self.mandatory_visa_insurance_fee_usd)
+        self.total_visa_cost_usd = (round(sum(components), 2)
+                                   if all(cost is not None for cost in components) else None)
+        return self
+
+
+class ConferenceVisaWhitePaper(BaseModel):
+    executive_summary: str
+    applicant_nationality: str
+    destination_country: str
+    visa_details: VisaRequirementDetails
+    required_documents: list[str]
+    step_by_step_procedure: list[str]
+    processing_time: str
+    recommended_timeline: list[TimelineStep]
+    financial_budget: BudgetBreakdown
+    disclaimer: str
+    source_urls: list[str] = Field(default_factory=list, description="Government or immigration authority sources actually found during research.")
+    research_status: Literal["rule_shortcut", "sources_reported", "unverified"] = "unverified"
+
+
 class ConferenceSearchInput(BaseModel):
     field: str
     start_date: date
