@@ -14,6 +14,7 @@ from langchain_tavily import TavilyExtract
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain.chat_models import init_chat_model
+from langgraph.errors import GraphRecursionError
 from langchain_tavily import TavilySearch, TavilyExtract
 
 from search_config import search_model_and_tools
@@ -41,7 +42,15 @@ search_tool = next(iter(search_tools), None)
 conference_agent = create_agent(
     model=model,
     tools=[],
-    response_format=ToolStrategy(ConferenceSearchOutput),
+    response_format=ToolStrategy(
+        ConferenceSearchOutput,
+        handle_errors=(
+            "The output failed validation. Fix only the fields named in the "
+            "error. If a registration fee or its currency is not stated, set "
+            "registration_status to 'unknown' and write in notes that the "
+            "registration fee could not be retrieved, and why."
+        ),
+    ),
     system_prompt="""
     You are an academic conference discovery expert.
 
@@ -69,7 +78,11 @@ conference_agent = create_agent(
     For registration costs:
     - Confirmed: published fee for the requested event.
     - Estimated: evidence-based approximation.
-    - Unknown: no reliable estimate available.
+    - Unknown: no reliable estimate available. State in notes
+      that the registration fee could not be retrieved.
+    - A free event is confirmed with registration_cost 0.
+    - A non-zero fee needs a currency; if none is stated, use
+      unknown and say in notes that the currency was missing.
 
     Use only source URLs appearing in the supplied results.
     Include all relevant source URLs, including separate
@@ -193,10 +206,27 @@ class ReviewedConference(Conference):
             if url
         ))
         data["source_urls"] = []
-        # The dedicated cost stage owns the final registration fields.
+        # The dedicated cost stage owns the final registration fields, but
+        # say explicitly what discovery reported instead of dropping it.
+        if conference.registration_status != "unknown":
+            amount = (
+                "free attendance" if conference.registration_cost == 0
+                else f"{conference.registration_cost:g} {conference.currency or ''}".strip()
+            )
+            registration_notes = (
+                f"Registration fee not verified: discovery search reported "
+                f"{amount} ({conference.registration_status}), but no pricing "
+                "page has confirmed it."
+            )
+        else:
+            registration_notes = (
+                "Registration fee could not be retrieved: discovery search "
+                "found no published fee."
+            )
         data["registration_cost"] = None
         data["currency"] = None
         data["registration_status"] = "unknown"
+        data["registration_notes"] = registration_notes
         return cls(**data, discovery_urls=discovery_urls)
 
 
@@ -1477,11 +1507,40 @@ def find_conferences(
     if search_tool is None:
         # The hosted search provides evidence to the model but no local pages
         # for the independent Tavily verification stage.
-        result = conference_agent.invoke(
-            {"messages": [{"role": "user", "content": request.model_dump_json()}]},
-            config={"recursion_limit": 20},
-        )
-        output = result["structured_response"]
+        state = {}
+        try:
+            # Stream so the last state is still available if the run fails.
+            for state in conference_agent.stream(
+                {"messages": [{"role": "user", "content": request.model_dump_json()}]},
+                config={"recursion_limit": 20},
+                stream_mode="values",
+            ):
+                pass
+            output = state["structured_response"]
+        except Exception as exc:
+            # Report the real failure instead of crashing the orchestrator.
+            if isinstance(exc, GraphRecursionError):
+                reason = "the discovery agent hit its step limit without producing a valid result"
+            elif isinstance(exc, KeyError) and "structured_response" in str(exc):
+                reason = "the discovery agent replied without a structured result"
+            else:
+                reason = (str(exc).splitlines() or ["no details"])[0][:200]
+            last_error = next(
+                (str(m.content) for m in reversed(state.get("messages", []))
+                 if type(m).__name__ == "ToolMessage" and str(m.content).startswith("Error")),
+                None,
+            )
+            if last_error:
+                print(f"[DISCOVERY LAST ERROR] {last_error[:1500]}")
+                reason += f"; last error: {' '.join(last_error.split())[:300]}"
+            print(f"[DISCOVERY FAILED] {type(exc).__name__}: {reason}")
+            return ExtendedConferenceOutput(
+                conferences=[],
+                search_summary=(
+                    f"Conference search failed ({type(exc).__name__}: {reason}). "
+                    "No candidates were returned; the search can be retried."
+                ),
+            )
         candidates = [
             ReviewedCandidate(
                 conference=ReviewedConference.from_discovery(event), status="provisional",

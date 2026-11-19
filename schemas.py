@@ -36,14 +36,57 @@ class Conference(BaseModel):
     source_urls: list[str]
     notes: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalise_registration(cls, data):
+        """Repair inconsistent cost fields instead of rejecting the whole
+        search output (which made the agent retry until it crashed).
+        Never invents a cost, and never drops one silently: whenever the
+        fee cannot be used, the notes state that it could not be retrieved."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        status = data.get("registration_status")
+        cost = data.get("registration_cost")
+        currency = data.get("currency")
+
+        def mark_not_retrieved(detail: str) -> None:
+            data["registration_status"] = "unknown"
+            data["registration_cost"] = None
+            data["currency"] = None
+            message = f"Registration fee could not be retrieved: {detail}"
+            notes = (data.get("notes") or "").strip()
+            if "Registration fee could not be retrieved" not in notes:
+                data["notes"] = f"{notes} {message}".strip()
+
+        if status == "unknown":
+            if cost is not None:
+                mark_not_retrieved(
+                    f"a figure of {cost:g} {currency or '(no currency)'} was "
+                    "mentioned but not confirmed by the sources."
+                )
+            elif "registration_notes" not in data:
+                # Records with registration_notes (ReviewedConference) explain
+                # the fee there instead.
+                mark_not_retrieved("no fee was published in the sources found.")
+        elif status in ("confirmed", "estimated"):
+            # A free event (cost 0) needs no currency.
+            if cost is None:
+                mark_not_retrieved(f"the fee was marked {status} but no amount was given.")
+            elif cost != 0 and not currency:
+                mark_not_retrieved(f"an amount of {cost:g} was found but its currency was not stated.")
+        return data
+
     @model_validator(mode="after")
     def check_registration(self):
         if self.registration_status == "unknown":
             if self.registration_cost is not None:
                 raise ValueError("Unknown registration must have no cost.")
         else:
-            if self.registration_cost is None or not self.currency:
-                raise ValueError("Known costs require an amount and currency.")
+            if self.registration_cost is None:
+                raise ValueError("Known costs require an amount.")
+            if self.registration_cost != 0 and not self.currency:
+                raise ValueError("Non-zero costs require a currency.")
         return self
 
 
