@@ -5,6 +5,7 @@ import os
 from typing import Literal
 
 from dotenv import load_dotenv
+from model_quota import pace_model_request
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from pydantic import BaseModel, Field, HttpUrl, model_validator
@@ -120,8 +121,9 @@ def _travel_agent():
     load_dotenv()
     model, tools = search_model_and_tools(max_results=6)
     return create_agent(
-        model=model,
-        tools=tools,
+        model=os.environ["MODEL"],
+        middleware=[pace_model_request],
+        tools=[TavilySearch(max_results=6, search_depth="basic")],
         response_format=ToolStrategy(TravelResearch),
         system_prompt="""Research round-trip transport and accommodation for one attendee.
         Use web search and compare distinct feasible routes or stays where available.

@@ -3,3 +3,4 @@ langchain-openrouter
 langchain-tavily
 python-dotenv
 pydantic>=2,<3
+pydantic-ai-slim[openrouter]>=1,<2

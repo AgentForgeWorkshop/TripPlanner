@@ -1,6 +1,7 @@
 import re
 
 from dotenv import load_dotenv
+from model_quota import pace_model_request
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 
@@ -16,6 +17,7 @@ model, search_tools = search_model_and_tools(max_results=8)
 
 accommodation_agent = create_agent(
     model=model,
+    middleware=[pace_model_request],
     tools=search_tools,
     response_format=ToolStrategy(AccommodationSearchOutput),
     system_prompt="""

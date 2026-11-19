@@ -1,0 +1,15 @@
+{
+  "field": "Artificial intelligence for chemistry and materials science",
+  "origin_city": "Chicago",
+  "origin_country": "US",
+  "passport_country": "India",
+  "residence_country": "US",
+  "window_start": "2027-01-01",
+  "window_end": "2027-06-30",
+  "unavailable_dates": ["2027-05-04", "2027-05-05"],
+  "max_trip_days": 7,
+  "destination_countries": ["SG", "MY", "TH", "ID", "VN", "US", "JP"],
+  "preferences": ["Prefer public transport when practical", "Prefer accommodation near the venue"],
+  "budget": "2500.00",
+  "currency": "USD"
+}
