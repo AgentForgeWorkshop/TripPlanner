@@ -14,6 +14,7 @@ from langchain_tavily import TavilyExtract
 from model_quota import pace_model_request
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
+from langgraph.errors import GraphRecursionError
 
 from search_config import search_model_and_tools
 from schemas import (
