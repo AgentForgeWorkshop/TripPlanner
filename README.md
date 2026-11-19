@@ -52,3 +52,19 @@ Python process. The default is 20 model calls per minute. Set
 if other applications use the same account. HTTP 429 responses pause the shared
 schedule for the provider's `Retry-After` interval (60 seconds if absent).
 The affected call gets up to two retries.
+
+### HTML trip report
+
+Run the built-in example with `.venv/bin/python orchestrator.py`, or supply your
+own JSON request and output path:
+
+```sh
+.venv/bin/python orchestrator.py --config ~/Downloads/request.json --output reports/trip.html
+```
+
+Open the resulting HTML file in a browser. The default output is
+`trip_report.html` in the current directory. Add `--verbose` for specialist
+diagnostics. The config uses `field`, `origin_city`, `origin_country`,
+`passport_country`, `residence_country`, `window_start`, `window_end`,
+`max_trip_days`, `destination_countries`, `budget`, and `currency`.
+Dates use YYYY-MM-DD. Optional lists are `unavailable_dates` and `preferences`.

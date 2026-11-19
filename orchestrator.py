@@ -1,4 +1,10 @@
+import argparse
+from contextlib import nullcontext, redirect_stdout
 import os
+from pathlib import Path
+from pydantic import ValidationError
+from langchain.agents.structured_output import ToolStrategy
+from trip_report import TripConfig, TripReport, render_report
 from datetime import date
 from dotenv import load_dotenv
 from model_quota import pace_model_request
@@ -95,6 +101,7 @@ orchestrator = create_agent(
     model=os.environ["MODEL"],
     middleware=[pace_model_request, report_specialist_rate_limit],
     tools=[find_conferences, find_accommodation, find_itinerary, find_visa_requirements],
+    response_format=ToolStrategy(TripReport),
     system_prompt="""
     You coordinate specialist agents to help users plan
     conference-related travel.
@@ -154,29 +161,56 @@ orchestrator = create_agent(
       location_status is "sourced". Otherwise say the
       location is not known and the user should check it.
 
+    Return the concise structured trip report. Use one comparison row per conference,
+    rows for relevant routes and stays, and one entry row per destination. Keep cells
+    short. Prefix estimated prices with ≈ and include currency and units. For unknown
+    costs write Unknown. Put sources, estimate basis, exclusions and visa application
+    details in row notes. Never count the same lodging twice or label a subtotal a
+    whole-trip total. For no matches or missing input, explain in the summary and
+    leave unsupported sections empty.
     """
 )
 
 
+DEFAULT_QUERY = (
+    "Find an academic ecology conference in Europe and USA between "
+    "January 1 and June 30, 2027, then find up to three places "
+    "to stay for the conference dates and best itinerary with flight details in terms of duration and price. "
+    "My total budget for the trip is 3000 USD. I prefer to travel by train if possible, but I am open to flights if they are significantly faster or cheaper. "
+    "My departure city is New York, and I would like to attend the conference with the lowest registration fee. "
+    "I currently hold an Indian passport. Include the visa requirements."
+)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Research conference trips and write an HTML comparison.")
+    parser.add_argument("--config", type=Path, help="Trip criteria in JSON format")
+    parser.add_argument("--output", type=Path, default=Path("trip_report.html"))
+    parser.add_argument("--verbose", action="store_true", help="Show specialist diagnostics")
+    args = parser.parse_args(argv)
+    config = None
+    query = DEFAULT_QUERY
+    if args.config:
+        try:
+            config = TripConfig.model_validate_json(args.config.read_bytes())
+        except (OSError, ValidationError) as exc:
+            parser.error(f"Unable to load {args.config}: {exc}")
+        query = ("Find conference, travel, accommodation and visa options using these trip criteria. "
+                 "Apply the travel window, unavailable dates, destination list, whole-trip budget "
+                 "and maximum trip length to the proposed itineraries. "
+                 "Country codes identify the origin, destinations, passport and residence.\n"
+                 + config.model_dump_json())
+
+    print("Researching trip options…", flush=True)
+    with open(os.devnull, "w") as quiet:
+        with (nullcontext() if args.verbose else redirect_stdout(quiet)):
+            result = orchestrator.invoke({"messages": [{"role": "user", "content": query}]},
+                                         config={"recursion_limit": 30})
+    report = TripReport.model_validate(result["structured_response"])
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(render_report(report, config), encoding="utf-8")
+    print(f"Trip report saved to {args.output.resolve()}")
+
+
 if __name__ == "__main__":
-    query = (
-        "Find an academic ecology conference in Europe and USA between "
-        "January 1 and June 30, 2027, then find up to three places "
-        "to stay for the conference dates and best itinerary with flight details in terms of duration and price. "
-        "My total budget for the trip is 3000 USD. I prefer to travel by train if possible, but I am open to flights if they are significantly faster or cheaper. "
-        "My departure city is New York, and I would like to attend the conference with the lowest registration fee. "
-        "I currently hold an Indian passport. Include the visa requirements."
-    )
-
-
-    result = orchestrator.invoke(
-        {
-            "messages": [
-                {"role": "user", "content": query}
-            ]
-        },
-        config={"recursion_limit": 20}
-    )
-
-    for message in result["messages"]:
-        message.pretty_print()
+    main()
