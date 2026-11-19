@@ -28,16 +28,22 @@ def find_conferences(
     start_date: date,
     end_date: date,
     geographic_preferences: list[str] | None = None,
-    max_results: int = 5
+    max_results: int = 5,
+    excluded_dates: list[date] | None = None,
+    in_person_only: bool = True,
 ) -> str:
-    """Delegate academic conference discovery to the conference expert."""
+    """Delegate academic conference discovery to the conference expert.
+    Pass the traveler's unavailable dates as excluded_dates."""
 
     request = ConferenceSearchInput(
         field=field,
         start_date=start_date,
         end_date=end_date,
         geographic_preferences=geographic_preferences or [],
-        max_results=max_results
+        max_results=max_results,
+        excluded_dates=excluded_dates or [],
+        # This orchestrator plans travel, so online-only events never apply.
+        in_person_only=True,
     )
 
     return search(request).model_dump_json()
@@ -50,9 +56,12 @@ def find_itinerary(request: TravelRequest) -> str:
 
 
 @tool
-def find_visa_requirements(nationality: str, destination_country: str) -> str:
-    """Look up conference entry requirements for a given passport nationality and destination country."""
-    return generate_visa_white_paper(nationality, destination_country).model_dump_json()
+def find_visa_requirements(nationality: str, destination_country: str,
+                           residence_country: str | None = None) -> str:
+    """Look up conference entry requirements for a passport nationality and destination
+    country. Always pass the traveler's country of residence when known."""
+    return generate_visa_white_paper(nationality, destination_country,
+                                     residence_country).model_dump_json()
 
 
 @tool(args_schema=AccommodationSearchInput)
@@ -109,7 +118,12 @@ orchestrator = create_agent(
     If a specialist reports a persistent rate limit, mark its findings unavailable
     and report the available results without calling it again for that request.
 
-    Delegate conference discovery to the conference expert.
+    Delegate conference discovery to the conference expert. Pass the
+    traveler's unavailable dates as excluded_dates. Recommend only
+    conferences from "conferences" (verified) or "provisional_candidates".
+    Mention an "unverified_candidates" entry only with its reason and label
+    it unverified. Never present "rejected_candidates". State each
+    conference's verification status in its notes.
 
     Delegate accommodation search to the accommodation expert
     once a conference has been found or chosen. Pass the
@@ -138,9 +152,13 @@ orchestrator = create_agent(
     For whole-trip budgets deduct known registration in the same currency first.
     If registration is unknown, flag whole-trip affordability as unverified.
     Preserve the specialist's status, estimates, limitations and source URLs.
+    If find_itinerary returns no_match, add a travel row saying no itinerary met
+    the constraints and give the rejected_options reasons (for example "only
+    option found lasts 8 days, over the 7-day maximum"), with its known cost.
     For visa questions and conference trip plans, use find_visa_requirements
     for each distinct destination being recommended. Use the traveler's stated
-    passport nationality. If it is missing, ask for it and report any trip
+    passport nationality and pass their residence country as residence_country.
+    If nationality is missing, ask for it and report any trip
     findings already available. Never infer citizenship from the departure city.
     Report visa or entry authorization, permitted stay, documents, application
     steps, processing time and estimated visa fees in relevant currency. Preserve the

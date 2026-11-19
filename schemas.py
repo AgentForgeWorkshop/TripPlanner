@@ -9,6 +9,11 @@ class ConferenceSearchInput(BaseModel):
     end_date: date
     geographic_preferences: list[str] = Field(default_factory=list)
     max_results: int = Field(default=5, ge=1, le=10)
+    excluded_dates: list[date] = Field(
+        default_factory=list,
+        description="Dates the attendee is unavailable; overlapping events are rejected.")
+    in_person_only: bool = Field(
+        default=False, description="Reject online-only events (webinars, virtual meetings).")
 
     @model_validator(mode="after")
     def check_dates(self):

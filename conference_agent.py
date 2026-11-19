@@ -4,10 +4,12 @@ import os
 import re
 import tempfile
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain_tavily import TavilyExtract
@@ -22,11 +24,13 @@ from schemas import (
     ConferenceSearchInput,
     ConferenceSearchOutput
 )
-from search_config import search_model_and_tools
 
 load_dotenv()
 
 DEBUG = True
+SEARCH_RESULTS_PER_QUERY = 8
+MAX_FETCH_BYTES = 2_000_000
+ONLINE_MARKERS = {"online", "virtual", "remote", "webinar", "n/a", "none"}
 MAX_SOURCES_PER_CONFERENCE = 6
 MAX_SNIPPET_CHARS = 2500
 MAX_PRICING_PAGES_PER_QUERY = 3
@@ -38,6 +42,9 @@ DISCOVERY_CACHE_DIR = Path(tempfile.gettempdir()) / "tripplanner-discovery"
 model, search_tools = search_model_and_tools(max_results=8)
 # OpenRouter performs its search on the server and supplies no local tool.
 search_tool = next(iter(search_tools), None)
+# Verification and pricing read only the pages supplied to them, so they use
+# the plain model: with hosted search, `model` would run a web search per call.
+plain_model = os.environ["MODEL"]
 
 conference_agent = create_agent(
     model=model,
@@ -75,6 +82,10 @@ conference_agent = create_agent(
     the requested search window.
 
     Tourist activities do not establish scientific relevance.
+    Only include events whose own programme is about the requested
+    field; a general meeting of a broader discipline is not enough.
+    Event aggregators and listing sites are not official websites.
+    For online-only events set city and country to "Online".
 
     For registration costs:
     - Confirmed: published fee for the requested event.
@@ -276,7 +287,7 @@ extract_tool = TavilyExtract(
 # STAGE 4: INDEPENDENT VERIFICATION AGENT
 
 verification_agent = create_agent(
-    model=model,
+    model=plain_model,
     middleware=[pace_model_request],
     tools=[],
     response_format=ToolStrategy(VerificationResult),
@@ -343,7 +354,7 @@ verification_agent = create_agent(
 
 
 pricing_agent = create_agent(
-    model=model,
+    model=plain_model,
     tools=[],
     response_format=ToolStrategy(RegistrationSearchResult),
     system_prompt="""
@@ -433,6 +444,85 @@ def is_social_media(url: str) -> bool:
             "x.com"
         ]
     )
+
+
+class _TextExtractor(HTMLParser):
+    """Collect visible page text; scripts, styles and templates are skipped."""
+
+    SKIP = {"script", "style", "noscript", "template", "svg", "head"}
+    BREAKS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+              "section", "article", "header", "footer", "table", "dt", "dd"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.skipping = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self.skipping += 1
+        elif tag in self.BREAKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self.skipping:
+            self.skipping -= 1
+        elif tag in self.BREAKS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.skipping:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        lines = (" ".join(line.split()) for line in "".join(self.parts).splitlines())
+        return "\n".join(line for line in lines if line)
+
+
+def fetch_page_text(url: str) -> str:
+    """Fetch one page directly (no Tavily) and return its visible text.
+
+    Used with hosted search, which gives the model results but no local
+    pages. Returns "" when the page cannot be fetched or is not HTML/text.
+    """
+    if urlsplit(url).scheme not in ("http", "https"):
+        return ""
+    try:
+        with httpx.Client(follow_redirects=True, timeout=15,
+                          headers={"User-Agent": "Mozilla/5.0 (compatible; TripPlanner/1.0)"}) as client:
+            response = client.get(url)
+        response.raise_for_status()
+    except Exception as exc:
+        print(f"[FETCH FAILED] {url}: {type(exc).__name__}")
+        return ""
+    kind = response.headers.get("content-type", "").lower()
+    if "html" not in kind and not kind.startswith("text/"):
+        print(f"[FETCH SKIPPED] {url}: unsupported content type {kind or 'unknown'}")
+        return ""
+    body = response.text[:MAX_FETCH_BYTES]
+    if "html" not in kind:
+        return body
+    parser = _TextExtractor()
+    parser.feed(body)
+    return parser.text()
+
+
+def extract_page(url: str) -> str:
+    """Full page text from Tavily Extract when configured, else a direct fetch."""
+    if extract_tool is None:
+        return fetch_page_text(url)
+    extracted = extract_tool.invoke({"urls": [url]})
+    if isinstance(extracted, dict) and extracted.get("results"):
+        return extracted["results"][0].get("raw_content", "") or ""
+    return ""
+
+
+def overlaps(conference: Conference, days: list[date]) -> list[date]:
+    return [day for day in days if conference.start_date <= day <= conference.end_date]
+
+
+def is_online_only(conference: Conference) -> bool:
+    location = {conference.city.strip().casefold(), conference.country.strip().casefold()}
+    return bool(location & ONLINE_MARKERS) or "webinar" in conference.name.casefold()
 
 
 def build_search_queries(request: ConferenceSearchInput) -> list[str]:
@@ -666,11 +756,12 @@ def collect_sources(
         f'conference dates registration official organizer'
     )
 
-    try:
-        followup = search_tool.invoke({"query": query})
-    except Exception as exc:
-        print(f"[WARNING] Follow-up search failed: {type(exc).__name__}")
-        followup = {}
+    followup = {}
+    if search_tool is not None:
+        try:
+            followup = search_tool.invoke({"query": query})
+        except Exception as exc:
+            print(f"[WARNING] Follow-up search failed: {type(exc).__name__}")
 
     # Retain original discovery evidence
     snippets = dict(discovery_snippets)
@@ -695,7 +786,7 @@ def collect_sources(
                     if item["content"] not in old:
                         snippets[url] = "\n\n".join(filter(None, [old, item["content"]]))
 
-    else:
+    elif search_tool is not None:
         print("[WARNING] Follow-up search returned no usable results.")
 
     # Remove duplicate URLs
@@ -711,27 +802,21 @@ def collect_sources(
         print(f"[EXTRACTING] {url}")
 
         try:
-            extracted = extract_tool.invoke({"urls": [url]})
+            content = extract_page(url)
         except Exception as exc:
             print(f"[WARNING] Extraction failed: {type(exc).__name__}")
-            extracted = {}
+            content = ""
 
-        if isinstance(extracted, dict) and extracted.get("results"):
+        if content:
+            sources.append({
+                "source_id": len(sources) + 1,
+                "url": url,
+                "retrieval_method": "full_page",
+                "content": content
+            })
 
-            content = extracted["results"][0].get(
-                "raw_content", ""
-            )
-
-            if content:
-                sources.append({
-                    "source_id": len(sources) + 1,
-                    "url": url,
-                    "retrieval_method": "full_page",
-                    "content": content
-                })
-
-                print("[SUCCESS] Webpage retrieved.")
-                continue
+            print("[SUCCESS] Webpage retrieved.")
+            continue
 
         # Extraction failed: retain available search evidence
         if url in snippets:
@@ -826,13 +911,14 @@ def verify_conference(
         return ReviewedCandidate(
             conference=ReviewedConference.from_discovery(conference),
             status="unverified",
-            reason="No accessible supporting sources."
+            reason="No accessible supporting sources: the event pages could not be "
+                   "retrieved, so dates, relevance and location are unchecked."
         )
 
     prompt = verification_prompt(conference, request.field, sources)
     if prompt is None:
         return ReviewedCandidate(
-            conference=conference, status="unverified",
+            conference=ReviewedConference.from_discovery(conference), status="unverified",
             reason="Source metadata exceeded the conference verification input budget.",
         )
 
@@ -1109,16 +1195,17 @@ def registration_queries(conference: ReviewedConference, field: str) -> list[tup
 def collect_pricing_sources(query: str, conference: ReviewedConference, tier: str) -> list[dict]:
     """Search once and retrieve at most three pages; retain search excerpts."""
 
-    try:
-        response = search_tool.invoke({"query": query})
-        if isinstance(response, str):
-            response = json.loads(response)
-        if not isinstance(response, dict) or not isinstance(response.get("results"), list):
-            raise ValueError("No usable pricing results")
-        items = response["results"]
-    except Exception as exc:
-        print(f"[PRICING SEARCH FAILED] {type(exc).__name__}")
-        items = []
+    items = []
+    if search_tool is not None:
+        try:
+            response = search_tool.invoke({"query": query})
+            if isinstance(response, str):
+                response = json.loads(response)
+            if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+                raise ValueError("No usable pricing results")
+            items = response["results"]
+        except Exception as exc:
+            print(f"[PRICING SEARCH FAILED] {type(exc).__name__}")
 
     pool = {}
     for item in items[:SEARCH_RESULTS_PER_QUERY]:
@@ -1149,12 +1236,10 @@ def collect_pricing_sources(query: str, conference: ReviewedConference, tier: st
         if url in extract_urls:
             print(f"[PRICING EXTRACT] {url}")
             try:
-                extracted = extract_tool.invoke({"urls": [url]})
-                if isinstance(extracted, dict) and extracted.get("results"):
-                    page = extracted["results"][0].get("raw_content")
-                    if page:
-                        content = page
-                        method = "full_page"
+                page = extract_page(url)
+                if page:
+                    content = page
+                    method = "full_page"
             except Exception as exc:
                 print(f"[PRICING EXTRACT FAILED] {type(exc).__name__}")
         if content:
@@ -1502,60 +1587,72 @@ def estimate_registration_cost(conference: ReviewedConference, field: str) -> No
 
 # STAGE 9: COMBINED DISCOVERY, VERIFICATION AND PRICING
 
+def discover_candidates_hosted(request: ConferenceSearchInput) -> tuple[list[Conference], str | None]:
+    """Hosted (OpenRouter) discovery. Returns candidates, or a failure reason."""
+
+    state = {}
+    try:
+        # Stream so the last state is still available if the run fails.
+        for state in conference_agent.stream(
+            {"messages": [{"role": "user", "content": request.model_dump_json()}]},
+            config={"recursion_limit": 20},
+            stream_mode="values",
+        ):
+            pass
+        output = state["structured_response"]
+    except Exception as exc:
+        # Report the real failure instead of crashing the orchestrator.
+        if isinstance(exc, GraphRecursionError):
+            reason = "the discovery agent hit its step limit without producing a valid result"
+        elif isinstance(exc, KeyError) and "structured_response" in str(exc):
+            reason = "the discovery agent replied without a structured result"
+        else:
+            reason = (str(exc).splitlines() or ["no details"])[0][:200]
+        last_error = next(
+            (str(m.content) for m in reversed(state.get("messages", []))
+             if type(m).__name__ == "ToolMessage" and str(m.content).startswith("Error")),
+            None,
+        )
+        if last_error:
+            print(f"[DISCOVERY LAST ERROR] {last_error[:1500]}")
+            reason += f"; last error: {' '.join(last_error.split())[:300]}"
+        print(f"[DISCOVERY FAILED] {type(exc).__name__}: {reason}")
+        return [], f"{type(exc).__name__}: {reason}"
+
+    if DEBUG:
+        print("\n--- EXTRACTED CANDIDATES (hosted search) ---")
+        print(output.model_dump_json(indent=2))
+    candidates, seen = [], set()
+    for conference in output.conferences:
+        identity = (" ".join(conference.name.casefold().split()),
+                    conference.start_date, conference.end_date)
+        if identity not in seen:
+            seen.add(identity)
+            candidates.append(conference)
+    return candidates, None
+
+
 def find_conferences(
     request: ConferenceSearchInput
 ) -> ExtendedConferenceOutput:
+    """Discover candidates with either search provider, then verify each one
+    against its fetched pages, so both providers apply the same relevance,
+    edition, date, location and authority checks."""
 
     if search_tool is None:
-        # The hosted search provides evidence to the model but no local pages
-        # for the independent Tavily verification stage.
-        state = {}
-        try:
-            # Stream so the last state is still available if the run fails.
-            for state in conference_agent.stream(
-                {"messages": [{"role": "user", "content": request.model_dump_json()}]},
-                config={"recursion_limit": 20},
-                stream_mode="values",
-            ):
-                pass
-            output = state["structured_response"]
-        except Exception as exc:
-            # Report the real failure instead of crashing the orchestrator.
-            if isinstance(exc, GraphRecursionError):
-                reason = "the discovery agent hit its step limit without producing a valid result"
-            elif isinstance(exc, KeyError) and "structured_response" in str(exc):
-                reason = "the discovery agent replied without a structured result"
-            else:
-                reason = (str(exc).splitlines() or ["no details"])[0][:200]
-            last_error = next(
-                (str(m.content) for m in reversed(state.get("messages", []))
-                 if type(m).__name__ == "ToolMessage" and str(m.content).startswith("Error")),
-                None,
-            )
-            if last_error:
-                print(f"[DISCOVERY LAST ERROR] {last_error[:1500]}")
-                reason += f"; last error: {' '.join(last_error.split())[:300]}"
-            print(f"[DISCOVERY FAILED] {type(exc).__name__}: {reason}")
+        discovered, failure = discover_candidates_hosted(request)
+        if failure:
             return ExtendedConferenceOutput(
                 conferences=[],
                 search_summary=(
-                    f"Conference search failed ({type(exc).__name__}: {reason}). "
+                    f"Conference search failed ({failure}). "
                     "No candidates were returned; the search can be retried."
                 ),
             )
-        candidates = [
-            ReviewedCandidate(
-                conference=ReviewedConference.from_discovery(event), status="provisional",
-                reason="Found by hosted web search; independent page verification is pending.",
-                supporting_urls=event.source_urls,
-            )
-            for event in output.conferences
-            if request.start_date <= event.start_date <= event.end_date <= request.end_date
-        ][:request.max_results]
-        return ExtendedConferenceOutput(conferences=[], provisional_candidates=candidates,
-                                        search_summary=output.search_summary)
-
-    discovered, discovery_snippets = discover_candidates(request)
+        # Hosted search leaves no local excerpts; verification fetches pages.
+        discovery_snippets = {}
+    else:
+        discovered, discovery_snippets = discover_candidates(request)
 
     # Apply a hard limit before initiating follow-up searches
     candidates = discovered[:request.max_results]
@@ -1585,11 +1682,30 @@ def find_conferences(
             )
             continue
 
-        reviewed = verify_conference(
-            conference,
-            request,
-            discovery_snippets
-        )
+        clashes = overlaps(conference, request.excluded_dates)
+        if clashes:
+            rejected.append(ReviewedCandidate(
+                conference=ReviewedConference.from_discovery(conference), status="rejected",
+                reason="Conference overlaps unavailable dates: "
+                       + ", ".join(day.isoformat() for day in clashes) + "."))
+            continue
+
+        if request.in_person_only and is_online_only(conference):
+            rejected.append(ReviewedCandidate(
+                conference=ReviewedConference.from_discovery(conference), status="rejected",
+                reason="Online-only event; an in-person event was requested."))
+            continue
+
+        try:
+            reviewed = verify_conference(
+                conference,
+                request,
+                discovery_snippets
+            )
+        except Exception as exc:
+            reviewed = ReviewedCandidate(
+                conference=ReviewedConference.from_discovery(conference), status="unverified",
+                reason=f"Verification failed ({type(exc).__name__}); details not checked.")
 
         print(
             f"[{reviewed.status.upper()}] "
@@ -1616,6 +1732,7 @@ def find_conferences(
         unverified_candidates=unverified,
         rejected_candidates=rejected,
         search_summary=(
+            f"Search provider: {'Tavily' if search_tool else 'OpenRouter hosted search with direct page fetch'}. "
             f"Discovered {len(discovered)} candidates. "
             f"Reviewed: {len(candidates)}. "
             f"Not reviewed due to limit: "
